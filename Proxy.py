@@ -152,8 +152,7 @@ while True:
                     # Read the entire file into cacheData as bytes
                     cacheData = cacheFile.read()
                     # Construct HTTP response headers with proper formatting
-                   # Includes status line, content length, content type, and connection close directive
-
+                    # Includes status line, content length, content type, and connection close directive
                 response_headers = (
                     "HTTP/1.1 200 OK\r\n"
                     f"Content-Length: {len(cacheData)}\r\n"
@@ -175,13 +174,102 @@ while True:
                     print('Error sending response:', e)
                 finally:
                     # Ensure the client socket is closed after attempting to send the response
-            # This runs regardless of success or failure
+                    # This runs regardless of success or failure
                     clientSocket.close()
             else:
                 # If the file doesn’t exist in the cache, log a cache miss
                 print('Cache miss: File not found in cache')
-                # Close the client socket since there’s no response to send
-                clientSocket.close()
+                
+                # ~~~~ INSERT CODE ~~~~
+                # Create a socket to connect to the origin server
+                originSocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                try:
+                    # Set a timeout of 10 seconds for the origin server connection
+                    originSocket.settimeout(10.0)
+                    # Resolve hostname to IP and connect to port 80 (HTTP default)
+                    originSocket.connect((hostname, 80))
+                    print(f'Connected to origin server: {hostname}')
+
+                    # Format the HTTP request to send to origin server
+                    # Use original method and resource path, specify HTTP/1.1
+                    request = f"{method} {resource} HTTP/1.1\r\n"
+                    request += f"Host: {hostname}\r\n"
+                    request += "Connection: close\r\n\r\n"
+                    
+                    # Send the request to origin server
+                    originSocket.sendall(request.encode('utf-8'))
+                    print('Request sent to origin server')
+
+                    # Receive response from origin server
+                    response_bytes = b""
+                    while True:
+                        data = originSocket.recv(BUFFER_SIZE)
+                        if not data:
+                            break
+                        response_bytes += data
+                    
+                    # Split response into headers and body
+                    header_end = response_bytes.find(b"\r\n\r\n")
+                    if header_end == -1:
+                        raise Exception("Invalid server response: No header-body separator")
+                    
+                    headers = response_bytes[:header_end].decode('utf-8')
+                    body = response_bytes[header_end + 4:]
+                    
+                    # Parse status code from first line of headers
+                    status_line = headers.split('\r\n')[0]
+                    status_code = status_line.split()[1]
+                    
+                    # Extract Content-Type from origin server headers (default to text/html if not found)
+                    content_type = "text/html; charset=utf-8"
+                    for line in headers.split('\r\n'):
+                        if line.lower().startswith('content-type:'):
+                            content_type = line.split(':', 1)[1].strip()
+                            break
+                    
+                    # Create cache directory if it doesn't exist
+                    os.makedirs(os.path.dirname(cacheLocation), exist_ok=True)
+                    
+                    # Store response in cache if successful (status 200)
+                    if status_code == "200":
+                        with open(cacheLocation, 'wb') as cacheFile:
+                            cacheFile.write(body)
+                        print(f'Cached response at: {cacheLocation}')
+                    
+                    # Prepare response for client
+                    # For 404 or other errors, forward original response
+                    response_headers = (
+                        f"HTTP/1.1 {status_line.split(' ', 1)[1]}\r\n"
+                        f"Content-Length: {len(body)}\r\n"
+                        f"Content-Type: {content_type}\r\n"
+                        "Connection: close\r\n"
+                        "\r\n"
+                    ).encode('utf-8')
+                    
+                    # Combine headers and body for client response
+                    response = response_headers + body
+                    
+                    # Send response to client
+                    clientSocket.sendall(response)
+                    print(f'Response sent to client with status: {status_code}')
+                    
+                except Exception as e:
+                    # Handle connection or parsing errors, including timeouts
+                    print(f'Error communicating with origin server: {e}')
+                    # Send 502 Bad Gateway response to client
+                    error_response = (
+                        "HTTP/1.1 502 Bad Gateway\r\n"
+                        "Content-Length: 0\r\n"
+                        "Connection: close\r\n\r\n"
+                    ).encode('utf-8')
+                    clientSocket.sendall(error_response)
+                
+                finally:
+                    # Clean up origin server socket
+                    originSocket.close()
+                    clientSocket.close()
+                # ~~~~ END CODE INSERT ~~~~
+
         except Exception as e:
             print('Error accessing cache:', e)
             clientSocket.close()
