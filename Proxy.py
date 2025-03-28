@@ -184,23 +184,23 @@ while True:
                 # Create a socket to connect to the origin server
                 originSocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 try:
-                    # Set a timeout of 10 seconds for the origin server connection
+                    # Set a timeout of 10 seconds to prevent hanging on slow origin servers
                     originSocket.settimeout(10.0)
-                    # Resolve hostname to IP and connect to port 80 (HTTP default)
+                    # Connect to the origin server on port 80 (default HTTP port)
                     originSocket.connect((hostname, 80))
                     print(f'Connected to origin server: {hostname}')
 
-                    # Format the HTTP request to send to origin server
-                    # Use original method and resource path, specify HTTP/1.1
+                    # Format the HTTP GET request for the origin server as per RFC 2616 Section 5.1.2
+                    # Include mandatory Host header and Connection: close for clean termination
                     request = f"{method} {resource} HTTP/1.1\r\n"
                     request += f"Host: {hostname}\r\n"
                     request += "Connection: close\r\n\r\n"
                     
-                    # Send the request to origin server
+                    # Send the request to the origin server
                     originSocket.sendall(request.encode('utf-8'))
                     print('Request sent to origin server')
 
-                    # Receive response from origin server
+                    # Receive the full response from the origin server
                     response_bytes = b""
                     while True:
                         data = originSocket.recv(BUFFER_SIZE)
@@ -208,64 +208,105 @@ while True:
                             break
                         response_bytes += data
                     
-                    # Split response into headers and body
+                    # Split response into headers and body using the double CRLF separator
                     header_end = response_bytes.find(b"\r\n\r\n")
                     if header_end == -1:
                         raise Exception("Invalid server response: No header-body separator")
                     
-                    headers = response_bytes[:header_end].decode('utf-8')
+                    headers = response_bytes[:header_end].decode('utf-8', errors='ignore')
                     body = response_bytes[header_end + 4:]
                     
-                    # Parse status code from first line of headers
+                    # Parse the status line to extract status code (e.g., 200, 301, 302, 404)
                     status_line = headers.split('\r\n')[0]
                     status_code = status_line.split()[1]
                     
-                    # Extract Content-Type from origin server headers (default to text/html if not found)
-                    content_type = "text/html; charset=utf-8"
+                    # Extract key headers for cache-control and redirect handling
+                    content_type = "text/html; charset=utf-8"  
+                    location = None  
+                    max_age = None   
+                    
+                    # Parse headers line by line (case-insensitive per RFC 2616)
                     for line in headers.split('\r\n'):
                         if line.lower().startswith('content-type:'):
                             content_type = line.split(':', 1)[1].strip()
-                            break
-                    
-                    # Create cache directory if it doesn't exist
-                    os.makedirs(os.path.dirname(cacheLocation), exist_ok=True)
-                    
-                    # Store response in cache if successful (status 200)
-                    if status_code == "200":
-                        with open(cacheLocation, 'wb') as cacheFile:
-                            cacheFile.write(body)
-                        print(f'Cached response at: {cacheLocation}')
-                    
-                    # Prepare response for client
-                    # For 404 or other errors, forward original response
+                        elif line.lower().startswith('location:'):
+                            location = line.split(':', 1)[1].strip()
+                        elif line.lower().startswith('cache-control:'):
+                            # Extract max-age value if present (RFC 2616 Section 13)
+                            cache_control = line.split(':', 1)[1].strip().lower()
+                            if 'max-age=' in cache_control:
+                                try:
+                                    max_age = int(cache_control.split('max-age=')[1].split(',')[0])
+                                except ValueError:
+                                    max_age = None  
+
+                    # Handle caching logic only for 200 OK responses with valid max-age
+                    if status_code == "200" and max_age != 0:
+                        # Sanitize cacheLocation to remove invalid filename characters (?, &, =, etc.)
+                        safe_cache_location = cacheLocation.replace('?', '_').replace('&', '_').replace('=', '_').replace(':', '_')
+                        try:
+                            # Create cache directory if it doesn't exist, using sanitized path
+                            os.makedirs(os.path.dirname(safe_cache_location), exist_ok=True)
+                            with open(safe_cache_location, 'wb') as cacheFile:
+                                cacheFile.write(body)
+                            print(f'Cached response at: {safe_cache_location} with max-age={max_age}')
+                        except Exception as cache_error:
+                            print(f'Failed to cache response: {cache_error}')
+                    elif status_code in ("301", "302"):
+                        # Log redirects but do not attempt to cache
+                        print(f'Redirect detected: {status_code} to {location}')
+                    elif max_age == 0:
+                        print('Not caching due to Cache-Control: max-age=0')
+                    else:
+                        print(f'Not caching response with status: {status_code}')
+
+                    # Prepare response headers for the client
                     response_headers = (
-                        f"HTTP/1.1 {status_line.split(' ', 1)[1]}\r\n"
+                        f"HTTP/1.1 {status_line.split(' ', 1)[1]}\r\n"  
                         f"Content-Length: {len(body)}\r\n"
                         f"Content-Type: {content_type}\r\n"
-                        "Connection: close\r\n"
-                        "\r\n"
-                    ).encode('utf-8')
+                    )
                     
-                    # Combine headers and body for client response
+                    # Include Location header for 301/302 redirects (RFC 2616 Section 10.3)
+                    if status_code in ("301", "302") and location:
+                        response_headers += f"Location: {location}\r\n"
+                    
+                    # Add Cache-Control header if max-age is specified
+                    if max_age is not None:
+                        response_headers += f"Cache-Control: max-age={max_age}\r\n"
+                    
+                    # Finalize headers with Connection: close
+                    response_headers += "Connection: close\r\n\r\n"
+                    response_headers = response_headers.encode('utf-8')
+                    
+                    # Combine headers and body into the final response
                     response = response_headers + body
                     
-                    # Send response to client
+                    # Send the response to the client
                     clientSocket.sendall(response)
                     print(f'Response sent to client with status: {status_code}')
-                    
+
                 except Exception as e:
-                    # Handle connection or parsing errors, including timeouts
+                    # Enhanced error handling for origin server communication
                     print(f'Error communicating with origin server: {e}')
-                    # Send 502 Bad Gateway response to client
-                    error_response = (
-                        "HTTP/1.1 502 Bad Gateway\r\n"
-                        "Content-Length: 0\r\n"
-                        "Connection: close\r\n\r\n"
-                    ).encode('utf-8')
+                    # Send appropriate error response based on failure type
+                    if isinstance(e, socket.timeout):
+                        error_response = (
+                            "HTTP/1.1 504 Gateway Timeout\r\n"
+                            "Content-Length: 0\r\n"
+                            "Connection: close\r\n\r\n"
+                        ).encode('utf-8')
+                    else:
+                        error_response = (
+                            "HTTP/1.1 502 Bad Gateway\r\n"
+                            "Content-Length: 0\r\n"
+                            "Connection: close\r\n\r\n"
+                        ).encode('utf-8')
                     clientSocket.sendall(error_response)
-                
+                    print('Sent error response to client')
+
                 finally:
-                    # Clean up origin server socket
+                    # Ensure sockets are closed in all cases
                     originSocket.close()
                     clientSocket.close()
                 # ~~~~ END CODE INSERT ~~~~
