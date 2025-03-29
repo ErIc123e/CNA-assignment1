@@ -184,8 +184,8 @@ while True:
                 # Create a socket to connect to the origin server
                 originSocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 try:
-                    # Set a timeout of 10 seconds to prevent hanging on slow origin servers
-                    originSocket.settimeout(10.0)
+                    # Set a timeout of 15 seconds to allow slower but valid responses
+                    originSocket.settimeout(15.0)
                     # Connect to the origin server on port 80 (default HTTP port)
                     originSocket.connect((hostname, 80))
                     print(f'Connected to origin server: {hostname}')
@@ -207,6 +207,7 @@ while True:
                         if not data:
                             break
                         response_bytes += data
+                    print(f'Received response from origin server (length: {len(response_bytes)} bytes)')
                     
                     # Split response into headers and body using the double CRLF separator
                     header_end = response_bytes.find(b"\r\n\r\n")
@@ -219,11 +220,12 @@ while True:
                     # Parse the status line to extract status code (e.g., 200, 301, 302, 404)
                     status_line = headers.split('\r\n')[0]
                     status_code = status_line.split()[1]
+                    print(f'Origin server status code: {status_code}')
                     
                     # Extract key headers for cache-control and redirect handling
                     content_type = "text/html; charset=utf-8"  
                     location = None  
-                    max_age = None   
+                    max_age = None  
                     
                     # Parse headers line by line (case-insensitive per RFC 2616)
                     for line in headers.split('\r\n'):
